@@ -200,6 +200,8 @@ dialog.drawer{margin:0 0 0 auto;height:100dvh;max-height:100dvh;width:min(780px,
 .pinpad button:active{background:var(--sunk)}
 .pinpad button[type=submit]{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
 dialog.pindlg{width:min(360px,calc(100vw - 32px))}
+.pinacts{display:grid;gap:10px}
+.btn.big{justify-content:center;font-size:1.1rem;padding:16px}
 dialog.wide{width:min(940px,calc(100vw - 32px))}
 table.pay{min-width:1100px}
 table.pay input{width:88px;text-align:right;padding:4px 6px;font:500 .82rem var(--mono)}
@@ -365,11 +367,11 @@ body.kiosk .bigclock b{font-size:4.2rem}
     <h3>Month summary</h3>
     <div class="tablebox">
       <table class="compact">
-        <thead><tr><th>Staff</th><th class="n">Days</th><th class="n">Hours</th><th class="n">Regular</th><th class="n">Overtime</th><th class="n">Missing sign-outs</th></tr></thead>
+        <thead><tr><th>Staff</th><th class="n">Days</th><th class="n">Lunch / breaks</th><th class="n">Total worked hours</th><th class="n">Regular</th><th class="n">Overtime</th><th class="n">Missing sign-outs</th></tr></thead>
         <tbody id="attSum"></tbody>
       </table>
     </div>
-    <p class="hint">Overtime counts hours over each person's weekly limit (44 h by default — Ontario's standard; change it per employee). Weeks run Monday to Sunday.</p>
+    <p class="hint">Worked hours = time between sign-in and sign-out minus lunch / breaks (unpaid). Overtime counts worked hours over each person's weekly limit (44 h by default — Ontario's standard; change it per employee). Weeks run Monday to Sunday.</p>
   </section>
 
   <!-- ============ Payroll ============ -->
@@ -768,6 +770,7 @@ Regards,
       <button type="button" data-pin="7">7</button><button type="button" data-pin="8">8</button><button type="button" data-pin="9">9</button>
       <button type="button" data-pin="back" aria-label="Delete">⌫</button><button type="button" data-pin="0">0</button><button type="submit" aria-label="Confirm">✓</button>
     </div>
+    <div class="pinacts" id="pinActs" hidden></div>
     <p class="hint" id="pinMsg" style="text-align:center;min-height:1.2em"></p>
   </form>
 </dialog>
@@ -782,6 +785,7 @@ Regards,
       <div class="field"><label for="dfStaff">Staff</label><select id="dfStaff"></select></div>
       <div class="field"><label for="dfDate">Date</label><input type="date" id="dfDate" required></div>
       <div class="field"><label for="dfIn">Signed in</label><input type="time" id="dfIn" required></div>
+      <div class="field"><label for="dfBreak">Lunch / breaks (minutes)</label><input type="number" id="dfBreak" min="0" max="600" step="5" placeholder="e.g. 30"><span class="hint">Unpaid — taken off the worked hours.</span></div>
       <div class="field"><label for="dfOut">Signed out</label><input type="time" id="dfOut"><span class="hint">Leave empty if still working.</span></div>
       <div class="field wide"><label for="dfNote">Note</label><input type="text" id="dfNote" placeholder="e.g. forgot to sign out — confirmed with manager"></div>
       <div class="wide rowacts"><button class="btn primary" type="submit" id="dfSave">Add entry</button><button class="btn" type="button" data-act="df-cancel" id="dfCancel" hidden>Cancel edit</button></div>
@@ -831,7 +835,7 @@ const SCHEMA = {
   Notes: [["id","ID"],["candidateId","Candidate ID"],["at","Time"],["author","Author"],["kind","Kind"],["text","Note"]],
   // time clock — kept in the clinic sheet so the front-desk device never needs the private HR sheet
   Staff: [["id","ID"],["name","Name"],["role","Role"],["pinHash","PIN (scrambled)"],["pinSalt","PIN salt"],["active","Active"],["createdAt","Created"],["updatedAt","Updated"]],
-  Attendance: [["id","ID"],["staffId","Staff ID"],["name","Name"],["date","Date"],["signIn","Sign in (UTC)"],["signOut","Sign out (UTC)"],["minutes","Minutes"],["source","Source"],["note","Note"],["createdBy","Created by"],["createdAt","Created"],["updatedAt","Updated"]]
+  Attendance: [["id","ID"],["staffId","Staff ID"],["name","Name"],["date","Date"],["signIn","Sign in (UTC)"],["signOut","Sign out (UTC)"],["breakStart","Lunch started (UTC)"],["breakEnd","Lunch ended (UTC)"],["breakMinutes","Lunch / breaks (min)"],["minutes","Worked minutes"],["source","Source"],["note","Note"],["createdBy","Created by"],["createdAt","Created"],["updatedAt","Updated"]]
 };
 const TABS = Object.keys(SCHEMA);
 /* Private HR sheet: only owners / managers share it. Never put SIN or bank details here — keep those with the payroll provider. */
@@ -2402,7 +2406,11 @@ const localDate = iso => ymdOf(partsInTz(Date.parse(iso), S.tz));
 const hhmm = iso => iso ? new Date(iso).toLocaleTimeString(undefined, { timeZone: S.tz, hour: "2-digit", minute: "2-digit" }) : "";
 const hhmmInput = iso => { const p = partsInTz(Date.parse(iso), S.tz); return `${pad(p.h)}:${pad(p.mi)}`; };
 const isoAt = (ymd, hm) => { const [y, m, d] = ymd.split("-").map(Number), [h, mi] = hm.split(":").map(Number); return new Date(instantMs({ y, m, d, h, mi }, S.tz)).toISOString(); };
-const attMin = a => a.source === "Removed" || !a.signIn || !a.signOut ? 0 : Math.max(0, Math.round((Date.parse(a.signOut) - Date.parse(a.signIn)) / 60000));
+const shiftMin = a => a.source === "Removed" || !a.signIn || !a.signOut ? 0 : Math.max(0, Math.round((Date.parse(a.signOut) - Date.parse(a.signIn)) / 60000));
+const breakMin = a => Math.max(0, Math.round(num(a.breakMinutes)));
+const attMin = a => Math.max(0, shiftMin(a) - (a.signOut ? breakMin(a) : 0));   // worked = shift minus lunch / breaks (unpaid)
+const onLunch = a => a && a.breakStart && !a.breakEnd;
+const lunchTxt = a => breakMin(a) ? `${breakMin(a)} min${a.breakStart && a.breakEnd ? ` (${hhmm(a.breakStart)}–${hhmm(a.breakEnd)})` : ""}` : "";
 const isOpen = a => a.source !== "Removed" && a.signIn && !a.signOut;
 const liveAtt = () => rows("Attendance").filter(a => a.source !== "Removed");
 const empOfStaff = sid => rows("Employees").find(e => e.staffId === sid);
@@ -2413,14 +2421,14 @@ const STALE = 16 * 3600e3;   // a sign-in older than this without a sign-out is 
 function splitHours(staffId, from, to, limitH = DEFAULT_OT){
   const limit = limitH * 60, start = mondayOf(from);
   const list = liveAtt().filter(a => a.staffId === staffId && a.date >= start && a.date <= to && a.signOut).sort((a, b) => Date.parse(a.signIn) - Date.parse(b.signIn));
-  const week = {}; let reg = 0, ot = 0, days = new Set();
+  const week = {}; let reg = 0, ot = 0, brk = 0, days = new Set();
   for (const a of list) {
     const m = attMin(a), wk = mondayOf(a.date), before = week[wk] || 0, after = before + m;
     week[wk] = after;
     const o = Math.max(0, after - limit) - Math.max(0, before - limit);
-    if (a.date >= from) { reg += m - o; ot += o; days.add(a.date); }
+    if (a.date >= from) { reg += m - o; ot += o; brk += breakMin(a); days.add(a.date); }
   }
-  return { reg, ot, total: reg + ot, days: days.size };
+  return { reg, ot, brk, total: reg + ot, days: days.size };
 }
 
 /* ---------- Drive folders (CVs, contracts) ---------- */
@@ -2504,7 +2512,7 @@ function renderEmp(){
   const ym = ymNow(), { from, to } = monthRange(ym);
   $("eHoursSub").textContent = ymLabel(ym);
   if (!e.staffId) $("eHoursBox").innerHTML = `<p class="hint">Set a time-clock PIN to start recording hours.</p>`;
-  else { const h = splitHours(e.staffId, from, to, num(e.overtimeAfter) || DEFAULT_OT); $("eHoursBox").innerHTML = `<div class="summary"><span><b>${h.days}</b>days</span><span><b>${r2(h.total / 60)}</b>hours</span><span><b>${r2(h.reg / 60)}</b>regular</span><span><b>${r2(h.ot / 60)}</b>overtime</span></div>`; }
+  else { const h = splitHours(e.staffId, from, to, num(e.overtimeAfter) || DEFAULT_OT); $("eHoursBox").innerHTML = `<div class="summary"><span><b>${h.days}</b>days</span><span><b>${r2(h.total / 60)}</b>hours worked</span><span><b>${r2(h.brk / 60)}</b>hours lunch</span><span><b>${r2(h.reg / 60)}</b>regular</span><span><b>${r2(h.ot / 60)}</b>overtime</span></div>`; }
   // payroll history
   const pr = rows("Payroll").filter(p => p.employeeId === e.id).sort((a, b) => b.month.localeCompare(a.month));
   $("ePay").innerHTML = pr.length ? `<div class="tablebox"><table class="compact"><thead><tr><th>Month</th><th class="n">Hours</th><th class="n">Gross</th><th class="n">Net</th><th>Status</th></tr></thead><tbody>${pr.map(p => `<tr><td>${esc(ymLabel(p.month))}</td><td class="n">${r2(num(p.regularHours) + num(p.overtimeHours))}</td><td class="n">${money(p.gross)}</td><td class="n">${money(p.net)}</td><td>${pill(PAY_STATUS[p.status], p.status || "Draft")}</td></tr>`).join("")}</tbody></table></div>` : `<p class="hint">No payroll yet.</p>`;
@@ -2602,7 +2610,7 @@ function renderTimeclock(){
   $("tcSub").textContent = `${inNow.length} signed in now · times in ${S.tz}`;
   $("kioskOn").hidden = document.body.classList.contains("kiosk"); $("kioskOff").hidden = !document.body.classList.contains("kiosk");
   $("tcTiles").innerHTML = staff.length ? staff.map(s => { const o = isInNow(s.id); return `<button class="tile${o ? " in" : ""}" type="button" data-act="tc-tile" data-id="${esc(s.id)}">
-      <b>${esc(s.name)}</b><span class="dim">${esc(s.role || "")}</span>${o ? pill("p-ok", `In since ${hhmm(o.signIn)}`) : pill("p-muted", "Out")}${s.pinHash ? "" : `<span class="dim">No PIN yet</span>`}</button>`; }).join("")
+      <b>${esc(s.name)}</b><span class="dim">${esc(s.role || "")}</span>${o ? (onLunch(o) ? pill("p-warn", `On lunch since ${hhmm(o.breakStart)}`) : pill("p-ok", `In since ${hhmm(o.signIn)}`)) : pill("p-muted", "Out")}${s.pinHash ? "" : `<span class="dim">No PIN yet</span>`}</button>`; }).join("")
     : `<div class="empty">Nobody is on the time clock yet. In <b>Employees</b>, open a person and set their PIN.</div>`;
   tickClock();
 }
@@ -2616,7 +2624,9 @@ function openPin(sid){
   const s = ST(sid); if (!s) return;
   if (!s.pinHash) { toast(`${s.name} has no PIN yet — a manager can set one in Employees.`); return; }
   S.pinSid = sid; $("pinInput").value = ""; $("pinMsg").textContent = "";
-  $("pinName").textContent = s.name; $("pinAction").textContent = isInNow(sid) ? "Enter your PIN to sign out" : "Enter your PIN to sign in";
+  $("pinName").textContent = s.name; const o = isInNow(sid);
+  $("pinAction").textContent = !o ? "Enter your PIN to sign in" : onLunch(o) ? "Enter your PIN to end lunch or sign out" : "Enter your PIN for lunch or to sign out";
+  $("pinActs").hidden = true; $("pinInput").hidden = false; $("pinPad").hidden = false;
   $("pinDlg").showModal(); $("pinInput").focus();
 }
 async function submitPin(){
@@ -2633,14 +2643,20 @@ async function submitPin(){
     return;
   }
   S.pinFails = { ...S.pinFails, [s.id]: 0 };
-  $("pinMsg").textContent = "Saving…";
+  $("pinMsg").textContent = "One moment…";
   try {
     await reloadTabs(["Attendance"]);   // another device may have signed them in or out
     const open = openOf(s.id), now = new Date().toISOString(), first = s.name.split(" ")[0];
     if (open && Date.now() - Date.parse(open.signIn) < STALE) {
-      const m = Math.round((Date.parse(now) - Date.parse(open.signIn)) / 60000);
-      await commit([{ tab: "Attendance", id: open.id, patch: { signOut: now, minutes: String(m) } }]);
-      toast(`Bye ${first} — signed out at ${hhmm(now)} (${hrsTxt(m)} today).`);
+      // signed in: let them choose lunch or sign out
+      S.pinOpen = open.id; $("pinMsg").textContent = "";
+      $("pinInput").hidden = true; $("pinPad").hidden = true; $("pinActs").hidden = false;
+      $("pinAction").textContent = onLunch(open) ? `On lunch since ${hhmm(open.breakStart)}` : `Signed in since ${hhmm(open.signIn)}`;
+      $("pinActs").innerHTML = onLunch(open)
+        ? `<button class="btn primary big" type="button" data-act="clock-do" data-do="lunch-end">End lunch</button><button class="btn big" type="button" data-act="clock-do" data-do="out">Sign out</button>`
+        : `<button class="btn big" type="button" data-act="clock-do" data-do="lunch-start">Start lunch</button><button class="btn primary big" type="button" data-act="clock-do" data-do="out">Sign out</button>`;
+      $("pinActs").querySelector(".primary").focus();
+      return;
     } else {
       await commit([{ tab: "Attendance", rec: { id: uid("a"), staffId: s.id, name: s.name, date: localDate(now), signIn: now, signOut: "", minutes: "", source: "Clock", note: "", createdBy: S.email } }]);
       toast(`Welcome ${first} — signed in at ${hhmm(now)}.${open ? " Your last sign-in had no sign-out; a manager will fix it." : ""}`);
@@ -2648,6 +2664,25 @@ async function submitPin(){
     $("pinDlg").close();
   } catch (e) { $("pinMsg").textContent = e.message; }
   renderAll();
+}
+// Start lunch / End lunch / Sign out for the person who just entered their PIN.
+async function clockDo(what){
+  const s = ST(S.pinSid), a = rows("Attendance").find(x => x.id === S.pinOpen); if (!s || !a) return;
+  const now = new Date().toISOString(), first = s.name.split(" ")[0];
+  const lunchSoFar = a.breakStart && !a.breakEnd ? Math.round((Date.parse(now) - Date.parse(a.breakStart)) / 60000) : 0;
+  if (what === "lunch-start") {
+    await commit([{ tab: "Attendance", id: a.id, patch: { breakStart: now, breakEnd: "" } }]);
+    toast(`Enjoy your lunch, ${first} — started at ${hhmm(now)}.`);
+  } else if (what === "lunch-end") {
+    const total = breakMin(a) + lunchSoFar;
+    await commit([{ tab: "Attendance", id: a.id, patch: { breakEnd: now, breakMinutes: String(total) } }]);
+    toast(`Welcome back, ${first} — lunch ${lunchSoFar} min.`);
+  } else {
+    const brk = breakMin(a) + lunchSoFar, worked = Math.max(0, Math.round((Date.parse(now) - Date.parse(a.signIn)) / 60000) - brk);
+    await commit([{ tab: "Attendance", id: a.id, patch: { signOut: now, minutes: String(worked), ...(lunchSoFar ? { breakEnd: now, breakMinutes: String(brk) } : {}) } }]);
+    toast(`Bye ${first} — signed out at ${hhmm(now)}. Worked ${hrsTxt(worked)} today${brk ? ` (${brk} min lunch)` : ""}.`);
+  }
+  $("pinDlg").close(); renderAll();
 }
 function setKiosk(on){
   document.body.classList.toggle("kiosk", on);
@@ -2669,22 +2704,22 @@ function renderAttendance(){
     const list = (byDate[d] || []).sort((a, b) => Date.parse(a.signIn) - Date.parse(b.signIn));
     const total = list.reduce((s, a) => s + attMin(a), 0);
     let lines;
-    if (S.attStaff) lines = list.map(a => `<span class="dline${isOpen(a) && d < today ? " warn" : ""}">${hhmm(a.signIn)}–${a.signOut ? hhmm(a.signOut) : d < today ? "⚠ no sign-out" : "in"}</span>`);
+    if (S.attStaff) lines = list.flatMap(a => [`<span class="dline${isOpen(a) && d < today ? " warn" : ""}">${hhmm(a.signIn)}–${a.signOut ? hhmm(a.signOut) : d < today ? "⚠ no sign-out" : onLunch(a) ? "lunch" : "in"}</span>`, ...(breakMin(a) ? [`<span class="dline">🍽 ${breakMin(a)} min lunch</span>`] : [])]);
     else {
       const per = {}; list.forEach(a => { const p = per[a.staffId] ||= { name: a.name, m: 0, open: false }; p.m += attMin(a); if (isOpen(a)) p.open = true; });
       lines = Object.values(per).map(p => `<span class="dline${p.open && d < today ? " warn" : ""}">${esc(p.name.split(" ")[0])} ${p.open && d >= today ? "· in" : p.open ? "⚠" : r2(p.m / 60) + "h"}</span>`);
     }
     const more = lines.length > 4 ? `<span class="dline">+${lines.length - 3} more</span>` : "";
-    cells.push(`<button class="day${d < from || d > to ? " other" : ""}${d === today ? " today" : ""}" type="button" data-act="att-day" data-d="${d}" aria-label="${esc(fmtDate(d))}: ${r2(total / 60)} hours">
-      <span class="dnum">${+d.slice(8)}</span>${total ? `<span class="dtot">${r2(total / 60)} h</span>` : ""}${(lines.length > 4 ? lines.slice(0, 3) : lines).join("")}${more}</button>`);
+    cells.push(`<button class="day${d < from || d > to ? " other" : ""}${d === today ? " today" : ""}" type="button" data-act="att-day" data-d="${d}" aria-label="${esc(fmtDate(d))}: ${r2(total / 60)} hours worked">
+      <span class="dnum">${+d.slice(8)}</span>${total ? `<span class="dtot" title="Hours worked (lunch excluded)">${r2(total / 60)} h</span>` : ""}${(lines.length > 4 ? lines.slice(0, 3) : lines).join("")}${more}</button>`);
   }
   $("attCal").innerHTML = cells.join("");
   const missing = liveAtt().filter(a => isOpen(a) && a.date < today && (!S.attStaff || a.staffId === S.attStaff)).sort((a, b) => b.date.localeCompare(a.date));
   $("attAlerts").innerHTML = missing.length ? `<div class="banner warn"><span><b>${plural(missing.length, "sign-in")}</b> without a sign-out: ${missing.slice(0, 6).map(a => `<button class="btn link" type="button" data-act="att-day" data-d="${a.date}">${esc(a.name.split(" ")[0])} ${esc(fmtDate(a.date))}</button>`).join(", ")}${missing.length > 6 ? "…" : ""}. Open the day to add the sign-out time.</span></div>` : "";
   const people = staff.filter(s => !S.attStaff || s.id === S.attStaff);
   $("attSum").innerHTML = people.length ? people.map(s => { const h = splitHours(s.id, from, to, otLimitFor(s.id)); const open = liveAtt().filter(a => a.staffId === s.id && isOpen(a) && a.date >= from && a.date <= to && a.date < today).length;
-      return `<tr><td><button class="btn link" type="button" data-act="att-staff" data-id="${esc(s.id)}">${esc(s.name)}</button></td><td class="n">${h.days}</td><td class="n">${r2(h.total / 60)}</td><td class="n">${r2(h.reg / 60)}</td><td class="n">${h.ot ? r2(h.ot / 60) : `<span class="dim">0</span>`}</td><td class="n">${open || `<span class="dim">0</span>`}</td></tr>`; }).join("")
-    : `<tr><td colspan="6" class="empty">Nobody is on the time clock yet.</td></tr>`;
+      return `<tr><td><button class="btn link" type="button" data-act="att-staff" data-id="${esc(s.id)}">${esc(s.name)}</button></td><td class="n">${h.days}</td><td class="n">${h.brk ? `${r2(h.brk / 60)} h` : `<span class="dim">—</span>`}</td><td class="n"><strong>${r2(h.total / 60)}</strong></td><td class="n">${r2(h.reg / 60)}</td><td class="n">${h.ot ? r2(h.ot / 60) : `<span class="dim">0</span>`}</td><td class="n">${open || `<span class="dim">0</span>`}</td></tr>`; }).join("")
+    : `<tr><td colspan="7" class="empty">Nobody is on the time clock yet.</td></tr>`;
 }
 function openDay(d){
   S.dayDate = d; S.dayEdit = null;
@@ -2694,24 +2729,24 @@ function openDay(d){
 }
 function resetDayForm(){
   S.dayEdit = null; $("dfTitle").textContent = "Add an entry"; $("dfSave").textContent = "Add entry"; $("dfCancel").hidden = true;
-  $("dfDate").value = S.dayDate; $("dfIn").value = "09:00"; $("dfOut").value = "17:00"; $("dfNote").value = ""; $("dfStaff").disabled = false;
+  $("dfDate").value = S.dayDate; $("dfIn").value = "09:00"; $("dfOut").value = "17:00"; $("dfBreak").value = "30"; $("dfNote").value = ""; $("dfStaff").disabled = false;
   if (S.attStaff) $("dfStaff").value = S.attStaff;
 }
 function renderDay(){
   const d = S.dayDate, list = rows("Attendance").filter(a => a.date === d).sort((a, b) => a.name.localeCompare(b.name) || Date.parse(a.signIn) - Date.parse(b.signIn));
   $("dayTitle").textContent = new Date(Date.UTC(...d.split("-").map((x, i) => i === 1 ? x - 1 : +x))).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
-  $("daySub").textContent = `${plural(list.filter(a => a.source !== "Removed").length, "entry")} · ${r2(list.reduce((s, a) => s + attMin(a), 0) / 60)} hours`;
-  $("dayList").innerHTML = list.length ? `<div class="tablebox"><table class="compact"><thead><tr><th>Staff</th><th>Signed in</th><th>Signed out</th><th class="n">Hours</th><th>Source</th><th></th></tr></thead><tbody>${list.map(a => {
+  $("daySub").textContent = `${plural(list.filter(a => a.source !== "Removed").length, "entry")} · ${r2(list.reduce((s, a) => s + attMin(a), 0) / 60)} hours worked`;
+  $("dayList").innerHTML = list.length ? `<div class="tablebox"><table class="compact"><thead><tr><th>Staff</th><th>Signed in</th><th>Lunch</th><th>Signed out</th><th class="n">Worked</th><th>Source</th><th></th></tr></thead><tbody>${list.map(a => {
       const removed = a.source === "Removed";
-      return `<tr class="${removed ? "archived" : ""}"><td><strong>${esc(a.name)}</strong>${a.note ? `<br><span class="dim">${esc(a.note)}</span>` : ""}</td><td class="when">${hhmm(a.signIn)}</td><td class="when">${a.signOut ? hhmm(a.signOut) : d < todayYMD() ? pill("p-warn", "Missing") : pill("p-ok", "Still in")}</td>
-        <td class="n">${a.signOut ? r2(attMin(a) / 60) : "—"}</td><td><span class="dim">${esc(a.source || "")}</span></td>
+      return `<tr class="${removed ? "archived" : ""}"><td><strong>${esc(a.name)}</strong>${a.note ? `<br><span class="dim">${esc(a.note)}</span>` : ""}</td><td class="when">${hhmm(a.signIn)}</td><td class="when">${onLunch(a) ? pill("p-warn", `Since ${hhmm(a.breakStart)}`) : lunchTxt(a) || `<span class="dim">—</span>`}</td><td class="when">${a.signOut ? hhmm(a.signOut) : d < todayYMD() ? pill("p-warn", "Missing") : pill("p-ok", "Still in")}</td>
+        <td class="n">${a.signOut ? `<strong>${r2(attMin(a) / 60)} h</strong>${breakMin(a) ? `<br><span class="dim">of ${r2(shiftMin(a) / 60)} h shift</span>` : ""}` : "—"}</td><td><span class="dim">${esc(a.source || "")}</span></td>
         <td><div class="rowacts">${removed ? `<button class="btn small" type="button" data-act="att-restore" data-id="${esc(a.id)}">Restore</button>` : `<button class="btn small" type="button" data-act="att-edit" data-id="${esc(a.id)}">Edit</button><button class="btn small danger" type="button" data-act="att-remove" data-id="${esc(a.id)}">Remove</button>`}</div></td></tr>`; }).join("")}</tbody></table></div>`
     : `<p class="hint">No sign-ins on this day.</p>`;
 }
 function editAttendance(id){
   const a = rows("Attendance").find(x => x.id === id); if (!a) return;
   S.dayEdit = id; $("dfTitle").textContent = `Edit ${a.name}'s entry`; $("dfSave").textContent = "Save changes"; $("dfCancel").hidden = false;
-  $("dfStaff").value = a.staffId; $("dfStaff").disabled = true; $("dfDate").value = a.date; $("dfIn").value = hhmmInput(a.signIn); $("dfOut").value = a.signOut ? hhmmInput(a.signOut) : ""; $("dfNote").value = a.note || "";
+  $("dfStaff").value = a.staffId; $("dfStaff").disabled = true; $("dfDate").value = a.date; $("dfIn").value = hhmmInput(a.signIn); $("dfOut").value = a.signOut ? hhmmInput(a.signOut) : ""; $("dfBreak").value = a.breakMinutes || ""; $("dfNote").value = a.note || "";
   $("dfIn").focus();
 }
 async function saveAttendance(){
@@ -2722,13 +2757,16 @@ async function saveAttendance(){
   let signOut = tout ? isoAt(date, tout) : "";
   if (signOut && Date.parse(signOut) <= Date.parse(signIn)) signOut = isoAt(addDays(date, 1), tout);   // overnight shift
   if (signOut && Date.parse(signOut) - Date.parse(signIn) > 20 * 3600e3) { toast("That's over 20 hours — check the times."); return; }
-  const minutes = signOut ? String(Math.round((Date.parse(signOut) - Date.parse(signIn)) / 60000)) : "";
+  const brk = Math.max(0, Math.round(num($("dfBreak").value)));
+  const span = signOut ? Math.round((Date.parse(signOut) - Date.parse(signIn)) / 60000) : 0;
+  if (signOut && brk >= span) { toast("The lunch break is as long as the whole shift — check the times."); return; }
+  const minutes = signOut ? String(span - brk) : "", breakMinutes = brk ? String(brk) : "";
   if (S.dayEdit) {
     const a = rows("Attendance").find(x => x.id === S.dayEdit);
-    await commit([{ tab: "Attendance", id: a.id, patch: { date, signIn, signOut, minutes, note: noteTxt, source: /^Clock/.test(a.source) ? "Clock (edited)" : "Manual" } }]);
+    await commit([{ tab: "Attendance", id: a.id, patch: { date, signIn, signOut, minutes, breakMinutes, note: noteTxt, source: /^Clock/.test(a.source) ? "Clock (edited)" : "Manual" } }]);
     toast("Entry updated");
   } else {
-    await commit([{ tab: "Attendance", rec: { id: uid("a"), staffId: s.id, name: s.name, date, signIn, signOut, minutes, source: "Manual", note: noteTxt, createdBy: S.email } }]);
+    await commit([{ tab: "Attendance", rec: { id: uid("a"), staffId: s.id, name: s.name, date, signIn, signOut, breakMinutes, minutes, source: "Manual", note: noteTxt, createdBy: S.email } }]);
     toast("Entry added");
   }
   S.dayDate = date; resetDayForm(); renderAll(); renderDay();
@@ -2741,9 +2779,10 @@ async function setAttendanceRemoved(id, removed){
 function exportAttendance(){
   const { from, to } = monthRange(S.attYm);
   const list = liveAtt().filter(a => a.date >= from && a.date <= to && (!S.attStaff || a.staffId === S.attStaff)).sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
-  const detail = [["Date", "Name", "Signed in", "Signed out", "Hours", "Source", "Note"], ...list.map(a => [a.date, a.name, hhmm(a.signIn), a.signOut ? hhmm(a.signOut) : "", a.signOut ? r2(attMin(a) / 60) : "", a.source, a.note])];
+  const detail = [["Date", "Name", "Signed in", "Lunch start", "Lunch end", "Lunch / breaks (min)", "Signed out", "Shift hours", "Worked hours", "Source", "Note"],
+    ...list.map(a => [a.date, a.name, hhmm(a.signIn), a.breakStart ? hhmm(a.breakStart) : "", a.breakEnd ? hhmm(a.breakEnd) : "", breakMin(a) || "", a.signOut ? hhmm(a.signOut) : "", a.signOut ? r2(shiftMin(a) / 60) : "", a.signOut ? r2(attMin(a) / 60) : "", a.source, a.note])];
   const people = rows("Staff").filter(s => !S.attStaff || s.id === S.attStaff);
-  const sum = [["Name", "Days", "Hours", "Regular", "Overtime"], ...people.map(s => { const h = splitHours(s.id, from, to, otLimitFor(s.id)); return [s.name, h.days, r2(h.total / 60), r2(h.reg / 60), r2(h.ot / 60)]; })];
+  const sum = [["Name", "Days", "Lunch / breaks (h)", "Total worked hours", "Regular", "Overtime"], ...people.map(s => { const h = splitHours(s.id, from, to, otLimitFor(s.id)); return [s.name, h.days, r2(h.brk / 60), r2(h.total / 60), r2(h.reg / 60), r2(h.ot / 60)]; })];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sum), "Summary");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(detail), "Sign-ins");
@@ -2948,6 +2987,7 @@ document.addEventListener("click", e => {
     case "contract": openContract(id); break;
     case "cand-to-emp": candToEmployee(); break;
     case "tc-tile": openPin(id); break;
+    case "clock-do": run(a, () => clockDo(a.dataset.do)); break;
     case "kiosk-on": setKiosk(true); break;
     case "kiosk-off": setKiosk(false); break;
     case "att-prev": S.attYm = ymAdd(S.attYm, -1); renderAttendance(); break;
